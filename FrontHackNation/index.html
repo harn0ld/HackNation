@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="pl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MapLibre – Miejsca z bazy</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.css"
+    />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        min-height: 100dvh;
+        font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #0f172a;
+        color: #f1f5f9;
+      }
+
+      #map {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .maplibregl-ctrl {
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      .maplibregl-ctrl-top-right {
+        margin: 12px;
+      }
+
+      #status {
+        position: absolute;
+        z-index: 2;
+        top: 16px;
+        left: 16px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        background: rgba(15, 23, 42, 0.85);
+        color: #f8fafc;
+        font-size: 0.85rem;
+        box-shadow: 0 12px 32px rgba(15, 23, 42, 0.35);
+        max-width: min(360px, calc(100% - 32px));
+        line-height: 1.35;
+        pointer-events: none;
+      }
+
+      @media (max-width: 640px) {
+        #status {
+          top: auto;
+          bottom: 16px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: calc(100% - 32px);
+          font-size: 0.78rem;
+          padding: 8px 10px;
+          text-align: center;
+        }
+
+        .maplibregl-ctrl-top-right {
+          top: auto;
+          bottom: 90px;
+          right: 12px;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .maplibregl-ctrl-group button {
+          width: 34px;
+          height: 34px;
+        }
+        .maplibregl-ctrl-geolocate {
+          width: 44px;
+          height: 44px;
+        }
+      }
+
+      .marker-monument {
+        width: 34px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      .marker-monument-body {
+        width: 34px;
+        height: 34px;
+        border-radius: 999px;
+        background: #fff;
+        border: 2px solid #7c3aed;
+        box-shadow: 0 8px 16px rgba(68, 51, 122, 0.35);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .marker-monument-tail {
+        width: 0;
+        height: 0;
+        border-left: 8px solid transparent;
+        border-right: 8px solid transparent;
+        border-top: 10px solid #7c3aed;
+        margin-top: -1px;
+      }
+
+      .marker-monument svg {
+        width: 16px;
+        height: 16px;
+        fill: #1f2937;
+      }
+
+
+    </style>
+  </head>
+  <body>
+    <div id="status">Ładuję miejsca…</div>
+    <div id="map"></div>
+    <script src="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.js"></script>
+    <script>
+      const MAPTILER_KEY = "get_your_own_OpIi9ZULNHzrESv6T2vL"; // podmień na własny
+      const currentOrigin = window.location.origin;
+      const defaultBackend =
+        window.location.protocol.startsWith("http") && window.location.port === "8000"
+          ? currentOrigin
+          : `${window.location.protocol === "file:" ? "http:" : window.location.protocol}//${
+              window.location.hostname || "127.0.0.1"
+            }:8000`;
+      const API_BASE_URL = window.BACKEND_URL || defaultBackend;
+      const OSRM_PROFILE = "walking";
+      const OSRM_BASE_URL = `https://router.project-osrm.org/route/v1/${OSRM_PROFILE}`;
+      const POINTS_ENDPOINT = `${API_BASE_URL}/points`;
+      const ROUTE_GEOJSON_ENDPOINT = `${API_BASE_URL}/route-geojson`;
+      const USER_PLACE_ID = "__user-location";
+      const initialCenter = [21.0122, 52.2297]; // Warszawa
+      const statusEl = document.getElementById("status");
+      const hasValidMaptilerKey =
+        typeof MAPTILER_KEY === "string" &&
+        MAPTILER_KEY.trim() !== "" &&
+        !/get_your_own/i.test(MAPTILER_KEY);
+
+      const faraCenter = [18.00168, 53.12324];
+      const map = new maplibregl.Map({
+        container: "map",
+        style: `https://api.maptiler.com/maps/streets/style.json?key=${MAPTILER_KEY}`,
+        center: initialCenter,
+        zoom: 14,
+        pitch: 60,
+        bearing: -20,
+        antialias: true,
+      });
+
+      const geolocateControl = new maplibregl.GeolocateControl({
+        positionOptions: { enableHighAccuracy: true },
+        fitBoundsOptions: { maxZoom: 17 },
+        showUserLocation: true,
+        trackUserLocation: true,
+      });
+      map.addControl(geolocateControl, "top-right");
+      geolocateControl.on("geolocate", (event) => {
+        userLocationCoords = [event.coords.longitude, event.coords.latitude];
+        ensureUserPlaceEntry();
+        upsertUserStartMarker(userLocationCoords);
+        void maybeApplyUserRoute();
+      });
+
+      map.on("styleimagemissing", (event) => {
+        if (map.hasImage(event.id)) return;
+        const size = 32;
+        const data = new Uint8Array(size * size * 4);
+        for (let i = 0; i < size * size; i += 1) {
+          const offset = i * 4;
+          data[offset] = 139;
+          data[offset + 1] = 92;
+          data[offset + 2] = 246;
+          data[offset + 3] = 255;
+        }
+        try {
+          map.addImage(
+            event.id,
+            { width: size, height: size, data },
+            { sdf: false, pixelRatio: 1 }
+          );
+        } catch (error) {
+          console.warn("Nie udało się dodać zastępczej ikony:", event.id, error);
+        }
+      });
+
+      const placesOfInterest = [];
+      const placeLookup = new Map();
+      let placeCounter = 0;
+      let userLocationCoords = null;
+      let poiRouteOrder = [];
+      let userLocationMarker = null;
+
+      function metersToLat(meters) {
+        return meters / 110540;
+      }
+
+      function metersToLng(meters, latitude) {
+        return meters / (111320 * Math.cos((latitude * Math.PI) / 180));
+      }
+
+      function buildRectangleAround(center, widthMeters, heightMeters) {
+        const halfWidth = widthMeters / 2;
+        const halfHeight = heightMeters / 2;
+        const latOffset = metersToLat(halfHeight);
+        const lngOffset = metersToLng(halfWidth, center[1]);
+        return [
+          [
+            [center[0] - lngOffset, center[1] - latOffset],
+            [center[0] + lngOffset, center[1] - latOffset],
+            [center[0] + lngOffset, center[1] + latOffset],
+            [center[0] - lngOffset, center[1] + latOffset],
+            [center[0] - lngOffset, center[1] - latOffset],
+          ],
+        ];
+      }
+
+      function updateStatus(message) {
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.style.display = message ? "block" : "none";
+      }
+
+
+      function createMonumentMarkerElement(title) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "marker-monument";
+        wrapper.title = title ?? "Miejsce";
+
+        const body = document.createElement("div");
+        body.className = "marker-monument-body";
+        body.innerHTML = `
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M9 3h6l.6 4H8.4L9 3zm-1 6h8l2 7H6l2-7zm-2.5 9h11l1 3h-13l1-3z" />
+          </svg>
+        `;
+
+        const tail = document.createElement("div");
+        tail.className = "marker-monument-tail";
+
+        wrapper.appendChild(body);
+        wrapper.appendChild(tail);
+        return wrapper;
+      }
+
+      function clearFallbackRoute() {
+        if (map.getLayer("fallback-route-layer")) {
+          map.removeLayer("fallback-route-layer");
+        }
+        if (map.getSource("fallback-route")) {
+          map.removeSource("fallback-route");
+        }
+      }
+
+      function addPlaceMarker(place) {
+        const coordinates = place.coordinates;
+        if (!coordinates) return;
+
+        const placeWithId = {
+          ...place,
+          coordinates,
+          id: place.id ?? `place-${placeCounter++}`,
+        };
+        placesOfInterest.push(placeWithId);
+        placeLookup.set(placeWithId.id, placeWithId);
+        const markerElement = createMonumentMarkerElement(placeWithId.name);
+
+        new maplibregl.Marker({ element: markerElement, anchor: "bottom" })
+          .setLngLat(coordinates)
+          .setPopup(
+            new maplibregl.Popup({ offset: 12 }).setHTML(
+              `<strong>${placeWithId.name ?? "Miejsce"}</strong><br/>${
+                placeWithId.description ?? ""
+              }`
+            )
+          )
+          .addTo(map);
+
+      }
+
+      function ensureUserPlaceEntry() {
+        if (!userLocationCoords) return;
+        placeLookup.set(USER_PLACE_ID, {
+          id: USER_PLACE_ID,
+          name: "Twoja lokalizacja",
+          coordinates: userLocationCoords,
+        });
+      }
+
+      function upsertUserStartMarker(coords) {
+        if (!map || !coords) return;
+        if (!userLocationMarker) {
+          const el = document.createElement("div");
+          el.className = "marker-user-start";
+          userLocationMarker = new maplibregl.Marker({
+            element: el,
+            anchor: "center",
+          });
+        }
+        userLocationMarker.setLngLat(coords).addTo(map);
+      }
+
+
+      async function loadPointsFromBackend() {
+        try {
+          updateStatus("Pobieram miejsca z backendu…");
+          const response = await fetch(POINTS_ENDPOINT, { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`Błąd ${response.status}`);
+          }
+          const records = await response.json();
+          placesOfInterest.length = 0;
+          placeLookup.clear();
+
+          if (!Array.isArray(records) || !records.length) {
+            updateStatus("Brak miejsc w bazie backendu.");
+            return;
+          }
+
+          const sequentialIds = [];
+          records.forEach((record) => {
+            if (
+              typeof record?.lng !== "number" ||
+              typeof record?.lat !== "number" ||
+              Number.isNaN(record.lng) ||
+              Number.isNaN(record.lat)
+            ) {
+              return;
+            }
+            addPlaceMarker({
+              id: record.id,
+              name: record.name || "Miejsce",
+              description: record.description ?? "",
+              coordinates: [record.lng, record.lat],
+              raw: record,
+            });
+            if (record.id) {
+              sequentialIds.push(record.id);
+            }
+          });
+          poiRouteOrder = sequentialIds.filter((value) => typeof value === "string");
+
+          if (placesOfInterest.length >= 2) {
+            clearFallbackRoute();
+            const usedRoadNetwork = await fetchAndDrawGeoRoute();
+            if (usedRoadNetwork) {
+              updateStatus("Trasa piesza ustawiona przez backend (optymalna).");
+            } else {
+              updateStatus("Brak trasy drogowej – spróbuj odświeżyć backend.");
+            }
+          } else {
+            updateStatus("Dodano tylko jeden punkt – backend nie ma jak ustalić trasy.");
+          }
+          return;
+        } catch (error) {
+          console.error("Nie udało się pobrać miejsc:", error);
+        }
+
+        const fallbackWorked = await loadPointsFromCsvFallback();
+        if (!fallbackWorked) {
+          updateStatus("Nie udało się pobrać miejsc (backend i CSV niedostępne).");
+        }
+      }
+
+      function parseSemicolonCsv(text) {
+        const rows = [];
+        let currentField = "";
+        let currentRow = [];
+        let insideQuotes = false;
+
+        for (let i = 0; i < text.length; i += 1) {
+          const char = text[i];
+          if (char === '"') {
+            if (insideQuotes && text[i + 1] === '"') {
+              currentField += '"';
+              i += 1;
+            } else {
+              insideQuotes = !insideQuotes;
+            }
+          } else if (char === ";" && !insideQuotes) {
+            currentRow.push(currentField);
+            currentField = "";
+          } else if ((char === "\n" || char === "\r") && !insideQuotes) {
+            if (char === "\r" && text[i + 1] === "\n") {
+              i += 1;
+            }
+            if (currentField.length > 0 || currentRow.length > 0) {
+              currentRow.push(currentField);
+              rows.push(currentRow);
+            }
+            currentRow = [];
+            currentField = "";
+          } else {
+            currentField += char;
+          }
+        }
+
+        if (currentField.length > 0 || currentRow.length > 0) {
+          currentRow.push(currentField);
+          rows.push(currentRow);
+        }
+
+        if (!rows.length) return [];
+
+        const headers = rows.shift().map((header) => header.trim().replace(/^\ufeff/, ""));
+        return rows
+          .filter((row) => row.some((value) => value && value.trim().length))
+          .map((row) => {
+            const entry = {};
+            headers.forEach((header, idx) => {
+              entry[header] = (row[idx] ?? "").trim();
+            });
+            return entry;
+          });
+      }
+
+      async function loadPointsFromCsvFallback() {
+        try {
+          updateStatus("Backend niedostępny – wczytuję punkty bezpośrednio z CSV…");
+          const [lokResponse, dbResponse] = await Promise.all([
+            fetch("lokalzacja.csv", { cache: "no-store" }),
+            fetch("database.csv", { cache: "no-store" }),
+          ]);
+
+          if (!lokResponse.ok) {
+            throw new Error(`Błąd ${lokResponse.status} przy pobieraniu lokalizacji.`);
+          }
+
+          const lokalizacjaRecords = parseSemicolonCsv(await lokResponse.text());
+          const sequentialIds = [];
+          placesOfInterest.length = 0;
+          placeLookup.clear();
+
+          lokalizacjaRecords.forEach((record, idx) => {
+            const id = record.ID || record.Id || record.id || `lok_${idx + 1}`;
+            const lat = parseFloat(record.x || record.X);
+            const lng = parseFloat(record.y || record.Y);
+            if (Number.isNaN(lat) || Number.isNaN(lng)) {
+              return;
+            }
+            sequentialIds.push(id);
+            addPlaceMarker({
+              id,
+              name: record.Localization || record.Localisation || `Localization ${idx + 1}`,
+              coordinates: [lng, lat],
+            });
+          });
+
+          if (dbResponse.ok) {
+            const dbRecords = parseSemicolonCsv(await dbResponse.text());
+            dbRecords.forEach((record, idx) => {
+              const gpsId = record["GPS ID"] || record["gps id"] || "";
+              const parts = gpsId
+                .replace(";", ",")
+                .split(",")
+                .map((value) => value.trim())
+                .filter(Boolean);
+              if (parts.length !== 2) return;
+              const lat = parseFloat(parts[0]);
+              const lng = parseFloat(parts[1]);
+              if (Number.isNaN(lat) || Number.isNaN(lng)) return;
+              const id = record.id || record.Id || `db_${idx + 1}`;
+              addPlaceMarker({
+                id,
+                name: record.Name || id,
+                description: record.Description || "",
+                coordinates: [lng, lat],
+              });
+            });
+          }
+
+          poiRouteOrder = sequentialIds.slice();
+
+          let osrmFallbackUsed = false;
+          if (sequentialIds.length >= 2) {
+            osrmFallbackUsed = await drawFallbackDrivingRoute(sequentialIds);
+          }
+
+          if (!osrmFallbackUsed && sequentialIds.length >= 2) {
+            drawSimplePath(sequentialIds);
+            updateStatus("Brak backendu – pokazuję trasę z CSV (prosta linia).");
+          } else if (!osrmFallbackUsed) {
+            updateStatus("Brak backendu – dodano tylko jeden punkt z CSV.");
+          }
+
+          return true;
+        } catch (error) {
+          console.error("Nie udało się pobrać danych z CSV:", error);
+          return false;
+        }
+      }
+
+      function drawSimplePath(sequence) {
+        if (!Array.isArray(sequence) || sequence.length < 2) return;
+        const coordinates = [];
+        if (userLocationCoords) {
+          coordinates.push([...userLocationCoords]);
+        }
+        sequence.forEach((identifier) => {
+          const place = placeLookup.get(identifier);
+          if (place?.coordinates) {
+            coordinates.push(place.coordinates);
+          }
+        });
+        if (coordinates.length < 2) return;
+
+        const feature = {
+          type: "Feature",
+          geometry: {
+            type: "LineString",
+            coordinates,
+          },
+          properties: {},
+        };
+
+        if (!map.getSource("fallback-route")) {
+          map.addSource("fallback-route", {
+            type: "geojson",
+            data: {
+              type: "FeatureCollection",
+              features: [feature],
+            },
+          });
+          map.addLayer({
+            id: "fallback-route-layer",
+            type: "line",
+            source: "fallback-route",
+            layout: {
+              "line-cap": "round",
+              "line-join": "round",
+            },
+            paint: {
+              "line-color": "#f97316",
+              "line-width": 4,
+            },
+          });
+        } else {
+          map.getSource("fallback-route").setData({
+            type: "FeatureCollection",
+            features: [feature],
+          });
+        }
+
+        const bounds = coordinates.reduce(
+          (acc, coord) => {
+            acc[0][0] = Math.min(acc[0][0], coord[0]);
+            acc[0][1] = Math.min(acc[0][1], coord[1]);
+            acc[1][0] = Math.max(acc[1][0], coord[0]);
+            acc[1][1] = Math.max(acc[1][1], coord[1]);
+            return acc;
+          },
+          [
+            [Infinity, Infinity],
+            [-Infinity, -Infinity],
+          ]
+        );
+
+        if (Number.isFinite(bounds[0][0]) && Number.isFinite(bounds[1][0])) {
+          map.fitBounds(bounds, { padding: 50, duration: 800 });
+        }
+      }
+
+      function renderDrivingRoute(data) {
+        const feature = data?.features?.[0];
+        if (!feature?.geometry || feature.geometry.type !== "LineString") {
+          return false;
+        }
+
+        const viaPoints = feature?.properties?.via_points;
+        if (Array.isArray(viaPoints) && viaPoints.length) {
+          poiRouteOrder = viaPoints.filter(
+            (identifier) => identifier && identifier !== USER_PLACE_ID
+          );
+        }
+
+        if (!map.getSource("driving-route-full")) {
+          map.addSource("driving-route-full", {
+            type: "geojson",
+            data,
+          });
+          map.addLayer({
+            id: "driving-route-full-layer",
+            type: "line",
+            source: "driving-route-full",
+            layout: {
+              "line-cap": "round",
+              "line-join": "round",
+            },
+            paint: {
+              "line-color": "#dc2626",
+              "line-width": 5,
+              "line-opacity": 0.9,
+            },
+          });
+        } else {
+          map.getSource("driving-route-full").setData(data);
+        }
+
+        const bounds = feature.geometry.coordinates.reduce(
+          (acc, coord) => {
+            acc[0][0] = Math.min(acc[0][0], coord[0]);
+            acc[0][1] = Math.min(acc[0][1], coord[1]);
+            acc[1][0] = Math.max(acc[1][0], coord[0]);
+            acc[1][1] = Math.max(acc[1][1], coord[1]);
+            return acc;
+          },
+          [
+            [Infinity, Infinity],
+            [-Infinity, -Infinity],
+          ]
+        );
+
+        if (Number.isFinite(bounds[0][0]) && Number.isFinite(bounds[1][0])) {
+          map.fitBounds(bounds, { padding: 60, duration: 800 });
+        }
+
+        if (feature?.properties?.source !== "osrm-user-route") {
+          void maybeApplyUserRoute();
+        }
+
+        return true;
+      }
+
+      async function fetchAndDrawGeoRoute() {
+        if (!ROUTE_GEOJSON_ENDPOINT) {
+          return false;
+        }
+
+        try {
+          const response = await fetch(ROUTE_GEOJSON_ENDPOINT, { cache: "no-store" });
+          if (response.status === 404) {
+            console.warn("Backend nie zwrócił jeszcze geometrii trasy (404).");
+            return false;
+          }
+          if (!response.ok) {
+            throw new Error(`Błąd ${response.status}`);
+          }
+          const data = await response.json();
+          const rendered = renderDrivingRoute(data);
+          if (!rendered) {
+            console.warn("Nieprawidłowy kształt trasy w odpowiedzi backendu.");
+          }
+          return rendered;
+        } catch (error) {
+          console.error("Nie udało się pobrać trasy drogowej:", error);
+          return false;
+        }
+      }
+
+      async function fetchOsrmRoute(sequence, sourceLabel = "osrm-route") {
+        const resolvedIds = [];
+        const coordinates = [];
+        sequence.forEach((identifier) => {
+          const place = placeLookup.get(identifier);
+          if (!place?.coordinates) return;
+          resolvedIds.push(identifier);
+          coordinates.push(place.coordinates);
+        });
+        if (coordinates.length < 2) {
+          return null;
+        }
+
+        const coordinateString = coordinates.map((coord) => `${coord[0]},${coord[1]}`).join(";");
+
+        try {
+          const response = await fetch(
+            `${OSRM_BASE_URL}/${coordinateString}?overview=full&geometries=geojson`
+          );
+          if (!response.ok) {
+            return null;
+          }
+          const data = await response.json();
+          const geometry = data?.routes?.[0]?.geometry;
+          if (!geometry) {
+            return null;
+          }
+
+          return {
+            type: "FeatureCollection",
+            features: [
+              {
+                type: "Feature",
+                geometry,
+                properties: {
+                  source: sourceLabel,
+                  via_points: resolvedIds,
+                },
+              },
+            ],
+          };
+        } catch (error) {
+          console.warn("Nie udało się pobrać trasy OSRM route:", error);
+          return null;
+        }
+      }
+
+      async function fetchOsrmSegment(start, end) {
+        const url = `${OSRM_BASE_URL}/${start[0]},${start[1]};${end[0]},${end[1]}?overview=full&geometries=geojson`;
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`OSRM error ${response.status}`);
+        }
+        const data = await response.json();
+        return data.routes?.[0]?.geometry?.coordinates ?? null;
+      }
+
+      async function maybeApplyUserRoute() {
+        if (!userLocationCoords || !poiRouteOrder.length) {
+          return false;
+        }
+        ensureUserPlaceEntry();
+        const sequence = [USER_PLACE_ID, ...poiRouteOrder];
+        const routeData = await fetchOsrmRoute(sequence, "osrm-user-route");
+        if (!routeData) {
+          return false;
+        }
+        const rendered = renderDrivingRoute(routeData);
+        if (rendered) {
+          updateStatus("Trasa piesza od Twojej lokalizacji.");
+        }
+        return rendered;
+      }
+
+      async function drawFallbackDrivingRoute(sequence) {
+        if (!Array.isArray(sequence) || sequence.length < 2) {
+          return false;
+        }
+
+        ensureUserPlaceEntry();
+        const sequenceWithUser = userLocationCoords
+          ? [USER_PLACE_ID, ...sequence]
+          : sequence.slice();
+
+        const routeData = await fetchOsrmRoute(sequenceWithUser);
+        if (routeData) {
+          const renderedTrip = renderDrivingRoute(routeData);
+          if (renderedTrip) {
+            clearFallbackRoute();
+            updateStatus("Trasa piesza (OSRM route – kolejność z CSV).");
+            return true;
+          }
+        }
+
+        const combined = [];
+        for (let idx = 0; idx < sequence.length - 1; idx += 1) {
+          const fromId = sequence[idx];
+          const toId = sequence[idx + 1];
+          const fromPlace = placeLookup.get(fromId);
+          const toPlace = placeLookup.get(toId);
+          if (!fromPlace?.coordinates || !toPlace?.coordinates) {
+            continue;
+          }
+
+          try {
+            const segment = await fetchOsrmSegment(fromPlace.coordinates, toPlace.coordinates);
+            if (!Array.isArray(segment) || !segment.length) {
+              continue;
+            }
+
+            if (!combined.length) {
+              combined.push(...segment);
+            } else if (
+              combined[combined.length - 1][0] === segment[0][0] &&
+              combined[combined.length - 1][1] === segment[0][1]
+            ) {
+              combined.push(...segment.slice(1));
+            } else {
+              combined.push(...segment);
+            }
+          } catch (error) {
+            console.warn("Nie udało się pobrać fragmentu trasy z OSRM:", error);
+          }
+        }
+
+        if (combined.length < 2) {
+          return false;
+        }
+
+        const data = {
+          type: "FeatureCollection",
+          features: [
+            {
+              type: "Feature",
+              geometry: {
+                type: "LineString",
+                coordinates: combined,
+              },
+              properties: {
+                source: "osrm-fallback",
+              },
+            },
+          ],
+        };
+
+        const rendered = renderDrivingRoute(data);
+        if (rendered) {
+          clearFallbackRoute();
+          updateStatus("Trasa piesza po drogach (segmenty OSRM).");
+        }
+        return rendered;
+      }
+
+      map.on("load", () => {
+        if (hasValidMaptilerKey) {
+          map.addSource("terrain", {
+            type: "raster-dem",
+            url: `https://api.maptiler.com/tiles/terrain-rgb/tiles.json?key=${MAPTILER_KEY}`,
+            tileSize: 256,
+            maxzoom: 14,
+          });
+          map.setTerrain({ source: "terrain", exaggeration: 1.5 });
+        } else {
+          console.warn(
+            "Pomijam warstwę terenu – podmień MAPTILER_KEY na własny, aby włączyć 3D terrain."
+          );
+        }
+
+        const styleLayers = map.getStyle()?.layers || [];
+        const buildingLayerExists = styleLayers.some(
+          (layer) => layer.id === "building"
+        );
+        const waterwayReferenceLayer =
+          styleLayers.find((layer) => layer.id === "waterway")?.id ||
+          styleLayers.find((layer) => /water/i.test(layer.id))?.id;
+
+        if (buildingLayerExists && waterwayReferenceLayer) {
+          map.addLayer(
+            {
+              id: "3d-buildings",
+              source: "openmaptiles",
+              "source-layer": "building",
+              filter: ["==", ["get", "extrude"], "true"],
+              type: "fill-extrusion",
+              minzoom: 13,
+              paint: {
+                "fill-extrusion-color": [
+                  "interpolate",
+                  ["linear"],
+                  ["to-number", ["get", "height"], 20],
+                  0,
+                  "#d8d7d5",
+                  200,
+                  "#f8f4ef",
+                ],
+                "fill-extrusion-height": [
+                  "interpolate",
+                  ["linear"],
+                  ["zoom"],
+                  13,
+                  0,
+                  13.05,
+                  [
+                    "coalesce",
+                    ["to-number", ["get", "render_height"]],
+                    ["to-number", ["get", "height"]],
+                    20,
+                  ],
+                ],
+                "fill-extrusion-base": [
+                  "coalesce",
+                  ["to-number", ["get", "render_min_height"]],
+                  ["to-number", ["get", "min_height"]],
+                  0,
+                ],
+                "fill-extrusion-opacity": 0.9,
+              },
+            },
+            waterwayReferenceLayer
+          );
+        } else {
+          console.warn(
+            "Pomijam dodatkową warstwę budynków 3D – nie znaleziono wymaganych warstw w stylu bazowym."
+          );
+        }
+
+        // Custom footprint for the church
+        const faraFootprint = {
+          type: "Feature",
+          properties: {
+            height: 32,
+            base: 0,
+            name: "Bazylika św. Marcina i Mikołaja (Fara)",
+          },
+          geometry: {
+            type: "Polygon",
+            coordinates: buildRectangleAround(faraCenter, 32, 58),
+          },
+        };
+
+        map.addSource("fara-model", {
+          type: "geojson",
+          data: {
+            type: "FeatureCollection",
+            features: [faraFootprint],
+          },
+        });
+
+        map.addLayer({
+          id: "fara-model-layer",
+          type: "fill-extrusion",
+          source: "fara-model",
+          paint: {
+            "fill-extrusion-color": "#c4b5fd",
+            "fill-extrusion-base": ["get", "base"],
+            "fill-extrusion-height": ["get", "height"],
+            "fill-extrusion-opacity": 0.9,
+          },
+        });
+
+        map.addLayer({
+          id: "fara-label",
+          type: "symbol",
+          source: "fara-model",
+          layout: {
+            "text-field": ["get", "name"],
+            "text-size": 12,
+            "text-offset": [0, 2],
+            "text-anchor": "top",
+          },
+          paint: {
+            "text-color": "#3b0764",
+            "text-halo-color": "#ffffff",
+            "text-halo-width": 1.2,
+          },
+        });
+
+        loadPointsFromBackend();
+
+        if (typeof geolocateControl.trigger === "function") {
+          geolocateControl.once("error", (error) => {
+            console.warn("Automatyczne pobranie lokalizacji nie powiodło się:", error);
+            updateStatus(
+              "Nie udało się automatycznie pobrać lokalizacji – kliknij przycisk GPS."
+            );
+          });
+          geolocateControl.trigger();
+        }
+      });
+
+      map.addControl(new maplibregl.NavigationControl(), "top-right");
+    </script>
+  </body>
+</html>
