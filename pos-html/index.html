@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mobile Pose Telemetry</title>
+  <style>
+    body { font-family: sans-serif; padding: 1em; }
+    #telemetry { margin-top: 1em; }
+    #telemetry p { margin: 0.2em 0; }
+    #permissions { margin-top: 2em; }
+    button { padding: 0.5em 1em; font-size: 1em; }
+  </style>
+</head>
+<body>
+  <h1>Device Orientation & Location Telemetry</h1>
+
+  <div id="permissions">
+    <button id="start">Start tracking</button>
+    <p id="status">Waiting to start…</p>
+  </div>
+
+  <div id="telemetry" style="display:none;">
+    <h2>Telemetry</h2>
+    <p id="yaw">Yaw (α / Z): —</p>
+    <p id="pitch">Pitch (β / X): —</p>
+    <p id="roll">Roll (γ / Y): —</p>
+    <p id="absolute">Absolute: —</p>
+    <p id="latlon">Lat/Lon: —</p>
+    <p id="alt">Altitude: —</p>
+    <p id="accuracy">Accuracy: —</p>
+    <p id="heading">Heading: —</p>
+    <p id="speed">Speed: —</p>
+    <p id="ts">Timestamp: —</p>
+  </div>
+
+  <script>
+    async function startMobilePoseTracking(onUpdate) {
+      // --- iOS permission gate ---
+      if (typeof DeviceOrientationEvent?.requestPermission === "function") {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res !== "granted") throw new Error("Orientation permission denied");
+      }
+      if (typeof DeviceMotionEvent?.requestPermission === "function") {
+        const res = await DeviceMotionEvent.requestPermission();
+        if (res !== "granted") throw new Error("Motion permission denied");
+      }
+      if (!navigator.geolocation) {
+        throw new Error("Geolocation not supported");
+      }
+
+      let lastOrientation = null;
+      let lastPosition = null;
+
+      window.addEventListener("deviceorientation", e => {
+        if (e.alpha === null) return;
+
+        lastOrientation = {
+          yaw:   e.alpha,   // degrees
+          pitch: e.beta,
+          roll:  e.gamma,
+          abs:   e.absolute === true,
+          ts:    performance.now()
+        };
+        if (lastPosition) onUpdate({ orientation: lastOrientation, position: lastPosition });
+      }, true);
+
+      const geoId = navigator.geolocation.watchPosition(
+        pos => {
+          lastPosition = {
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            alt: pos.coords.altitude,
+            acc: pos.coords.accuracy,
+            heading: pos.coords.heading,
+            speed: pos.coords.speed,
+            ts: pos.timestamp
+          };
+          if (lastOrientation) onUpdate({ orientation: lastOrientation, position: lastPosition });
+        },
+        err => console.error("Geo error:", err),
+        { enableHighAccuracy: true }
+      );
+
+      return () => {
+        navigator.geolocation.clearWatch(geoId);
+        window.removeEventListener("deviceorientation", () => {});
+      };
+    }
+
+    document.getElementById("start").addEventListener("click", async () => {
+      document.getElementById("status").textContent = "Requesting permissions...";
+      try {
+        await startMobilePoseTracking(pose => {
+          const o = pose.orientation;
+          const p = pose.position;
+
+          document.getElementById("telemetry").style.display = "block";
+          document.getElementById("yaw").textContent     = "Yaw (α / Z): "   + o.yaw.toFixed(2)   + "°";
+          document.getElementById("pitch").textContent   = "Pitch (β / X): " + o.pitch.toFixed(2) + "°";
+          document.getElementById("roll").textContent    = "Roll (γ / Y): "  + o.roll.toFixed(2)  + "°";
+          document.getElementById("absolute").textContent = "Absolute: "      + o.abs;
+
+          document.getElementById("latlon").textContent  = "Lat / Lon: "     + p.lat.toFixed(6) + " , " + p.lon.toFixed(6);
+          document.getElementById("alt").textContent     = "Altitude: "      + (p.alt ?? "—");
+          document.getElementById("accuracy").textContent = "Accuracy: "     + (p.acc ?? "—") + " m";
+          document.getElementById("heading").textContent  = "Heading: "       + (p.heading ?? "—");
+          document.getElementById("speed").textContent    = "Speed: "         + (p.speed ?? "—") + " m/s";
+          document.getElementById("ts").textContent       = "Timestamp: "     + new Date(p.ts).toLocaleString();
+        });
+        document.getElementById("status").textContent = "Tracking… move your device.";
+      } catch (err) {
+        console.error(err);
+        document.getElementById("status").textContent = "Error — " + err.message;
+      }
+    });
+  </script>
+</body>
+</html>
+
