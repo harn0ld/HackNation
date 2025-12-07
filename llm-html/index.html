@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wllama.cpp minimal demo</title>
+  <style>
+    body {
+      background-color: #373737;
+      color: #dedede;
+      font-family: 'Courier New', monospace;
+      padding: 1em;
+    }
+    #output {
+      border: 1px solid #aaa;
+      border-radius: 5px;
+      padding: 0.7em;
+      min-height: 100px;
+      margin-top: 0.5em;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>Completion Demo</h2>
+
+  <label for="input_prompt">Prompt:</label>
+  <input id="input_prompt" value="Once upon a time," style="width: 60%;" />
+  <button id="btn_run">Run</button>
+
+  <div id="output">Waiting for completion...</div>
+
+  <script type="module">
+    import { Wllama } from './esm/index.js';
+
+    const CONFIG_PATHS = {
+      'single-thread/wllama.wasm': './esm/single-thread/wllama.wasm',
+      'multi-thread/wllama.wasm': './esm/multi-thread/wllama.wasm'
+    };
+
+    // Make sure this URL is accessible via your local server
+    const MODEL_FILE = 'http://localhost:8080/gemma-3-270m-it.Q4_K_M.gguf';
+
+    const elemInput = document.getElementById('input_prompt');
+    const elemBtnRun = document.getElementById('btn_run');
+    const elemOutput = document.getElementById('output');
+
+    async function main() {
+      const wllama = new Wllama(CONFIG_PATHS);
+
+      // Load the model from the local server
+      await wllama.loadModelFromUrl(MODEL_FILE);
+
+      elemBtnRun.onclick = async () => {
+        elemBtnRun.disabled = true;
+        elemOutput.textContent = 'Generating...';
+        await wllama.createCompletion(elemInput.value, {
+          nPredict: 100,
+          sampling: { temp: 0.1, top_k: 10, top_p: 0.9 },
+          onNewToken: (token, piece, currentText) => {
+            elemOutput.textContent = currentText;
+          }
+        });
+        elemBtnRun.disabled = false;
+      };
+    }
+
+    main();
+  </script>
+
+</body>
+</html>
+
