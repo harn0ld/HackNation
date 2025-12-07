@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -54,6 +55,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount(
+    "/llm-html",
+    StaticFiles(directory=BASE_DIR.parent / "llm-html"),
+    name="llm-html",
+)
+
+
+@app.get("/lokalzacja.csv")
+def get_lokalizacja_csv() -> FileResponse:
+    """Serve lokalizacja CSV for the frontend fallback."""
+    if not POINTS_CSV.exists():
+        raise HTTPException(status_code=404, detail="lokalzacja.csv not found")
+    return FileResponse(POINTS_CSV, media_type="text/csv")
+
+
+@app.get("/database.csv")
+def get_database_csv() -> FileResponse:
+    """Serve database CSV for the frontend fallback."""
+    if not DATABASE_CSV.exists():
+        raise HTTPException(status_code=404, detail="database.csv not found")
+    return FileResponse(DATABASE_CSV, media_type="text/csv")
 
 points: Dict[str, Point] = {}
 routes: List[Route] = []

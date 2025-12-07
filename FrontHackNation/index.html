@@ -32,6 +32,14 @@
         overflow: hidden;
       }
 
+      .maplibregl-popup-content {
+        color: #0f172a;
+      }
+
+      .maplibregl-popup-content strong {
+        color: #000;
+      }
+
       .maplibregl-ctrl-top-right {
         margin: 12px;
       }
@@ -116,13 +124,339 @@
         fill: #1f2937;
       }
 
+      #llm-panel {
+        position: absolute;
+        right: 16px;
+        top: 16px;
+        width: min(360px, calc(100% - 32px));
+        max-height: calc(100% - 32px);
+        padding: 16px;
+        border-radius: 16px;
+        background: rgba(15, 23, 42, 0.92);
+        color: #f8fafc;
+        box-shadow: 0 20px 45px rgba(15, 23, 42, 0.45);
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        overflow: hidden;
+        z-index: 3;
+        backdrop-filter: blur(8px);
+      }
+
+      #llm-panel h2 {
+        margin: 0;
+        font-size: 1.2rem;
+      }
+
+      #llm-status {
+        font-size: 0.85rem;
+        color: #cbd5f5;
+        margin: 0;
+      }
+
+      #llm-current-place {
+        font-size: 0.95rem;
+        font-weight: 600;
+      }
+
+      #llm-output {
+        flex: 1;
+        border-radius: 12px;
+        background: rgba(15, 23, 42, 0.65);
+        border: 1px solid rgba(248, 250, 252, 0.1);
+        padding: 12px;
+        margin: 0;
+        overflow-y: auto;
+        font-family: "Inter", system-ui, sans-serif;
+        font-size: 0.92rem;
+        white-space: pre-wrap;
+      }
+
+      @media (max-width: 900px) {
+        #llm-panel {
+          position: static;
+          width: 100%;
+          max-height: none;
+          margin: 16px;
+        }
+      }
+
+      #pose-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      #pose-toggle {
+        border: none;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #7c3aed, #a855f7);
+        color: #fff;
+        font-weight: 600;
+        font-size: 0.95rem;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+
+      #pose-toggle[disabled] {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      #pose-feedback {
+        margin: 0;
+        font-size: 0.85rem;
+        color: #cbd5f5;
+        min-height: 2.5rem;
+      }
 
     </style>
   </head>
   <body>
     <div id="status">Ładuję miejsca…</div>
+    <div id="llm-panel">
+      <div>
+        <h2>Przewodnik AI</h2>
+        <p id="llm-status">Rozpoczynam ładowanie modelu…</p>
+      </div>
+      <div id="llm-current-place">Wybierz lokalizację na mapie.</div>
+      <pre id="llm-output">Jeszcze nic nie wygenerowano.</pre>
+      <div id="pose-controls">
+        <button id="pose-toggle">Aktywuj tryb mobilny</button>
+        <p id="pose-feedback">Tryb mobilny nieaktywny.</p>
+      </div>
+    </div>
     <div id="map"></div>
     <script src="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.js"></script>
+    <script type="module">
+      const LLM_LOCAL_ASSET_BASE = new URL("../llm-html/", import.meta.url)
+        .href.replace(/\/$/, "");
+      const LLM_REMOTE_ASSET_BASE = "https://hn-test.netlify.app/llm-html";
+      const MODEL_SOURCES = [
+        {
+          label: "lokalnej kopii",
+          url: `${LLM_LOCAL_ASSET_BASE}/gemma-3-270m-it.Q4_K_M.gguf`,
+        },
+        {
+          label: "kopii zapasowej",
+          url: `${LLM_REMOTE_ASSET_BASE}/gemma-3-270m-it.Q4_K_M.gguf`,
+          corsProxy: "https://cors.isomorphic-git.org/",
+        },
+      ];
+      const { Wllama } = await import(`${LLM_LOCAL_ASSET_BASE}/esm/index.js`);
+
+      const CONFIG_PATHS = {
+        "single-thread/wllama.wasm": `${LLM_LOCAL_ASSET_BASE}/esm/single-thread/wllama.wasm`,
+        "multi-thread/wllama.wasm": `${LLM_LOCAL_ASSET_BASE}/esm/multi-thread/wllama.wasm`,
+      };
+
+      const statusEl = document.getElementById("llm-status");
+      const currentPlaceEl = document.getElementById("llm-current-place");
+      const outputEl = document.getElementById("llm-output");
+
+      class BrowserGuideLLM {
+        constructor() {
+          this.wllama = null;
+          this.modelReady = false;
+          this.isGenerating = false;
+          this.pendingPlace = null;
+          this.initialize();
+        }
+
+        async initialize() {
+          try {
+            for (const source of MODEL_SOURCES) {
+              statusEl.textContent = `Ładuję model przewodnika (${source.label})…`;
+              try {
+                await this.loadModelFromSource(source);
+                this.modelReady = true;
+                statusEl.textContent =
+                  "Model gotowy. Kliknij punkt na mapie, aby wygenerować narrację.";
+                return;
+              } catch (error) {
+                console.error(`Nie udało się załadować ${source.label}:`, error);
+              }
+            }
+            statusEl.textContent =
+              "Błąd ładowania modelu – odśwież stronę lub sprawdź połączenie.";
+          } catch (error) {
+            console.error("Nie udało się załadować modelu LLM:", error);
+            statusEl.textContent =
+              "Błąd ładowania modelu – odśwież stronę lub sprawdź połączenie.";
+          }
+        }
+
+        async loadModelFromSource(source) {
+          const resolvedUrl = this.resolveModelUrl(source);
+          const candidate = new Wllama(CONFIG_PATHS);
+          try {
+            await candidate.loadModelFromUrl(resolvedUrl);
+          } catch (error) {
+            if (this.shouldResetCache(error)) {
+              await candidate.modelManager.clear().catch((clearError) => {
+                console.warn("Nie udało się wyczyścić pamięci OPFS:", clearError);
+              });
+              await candidate.loadModelFromUrl(resolvedUrl, { useCache: false });
+            } else {
+              await candidate.exit().catch(() => {});
+              throw error;
+            }
+          }
+          await this.replaceWllama(candidate);
+        }
+
+        resolveModelUrl(source) {
+          if (source.corsProxy) {
+            return `${source.corsProxy}${source.url}`;
+          }
+          return source.url;
+        }
+
+        async replaceWllama(instance) {
+          if (this.wllama && this.wllama !== instance) {
+            await this.wllama.exit().catch(() => {});
+          }
+          this.wllama = instance;
+        }
+
+        shouldResetCache(error) {
+          const message = (error && error.message) || "";
+          return (
+            /invalid magic/i.test(message) ||
+            /typed array length/i.test(message) ||
+            /Error while loading model/i.test(message)
+          );
+        }
+
+        describePlace(place, context = {}) {
+          if (!place) return;
+          this.pendingPlace = { place, context: context || {} };
+          if (!this.modelReady) {
+            statusEl.textContent = "Model nadal się ładuje – proszę czekać…";
+            return;
+          }
+          if (!this.isGenerating) {
+            void this.processQueue();
+          }
+        }
+
+        async processQueue() {
+          if (this.isGenerating || !this.pendingPlace || !this.modelReady) {
+            return;
+          }
+          const currentTask = this.pendingPlace;
+          this.pendingPlace = null;
+          await this.generateForPlace(currentTask);
+          if (this.pendingPlace) {
+            await this.processQueue();
+          }
+        }
+
+        buildPrompt(place, context = {}) {
+          const description = place.description?.trim();
+          const fallback = "Brak opisu w bazie, więc uzupełnij ciekawostkami z wiedzy ogólnej.";
+          const contextLines = this.buildContextLines(place, context, description || fallback);
+          return [
+            "Jesteś przewodnikiem miejskim mówiącym po polsku.",
+            "Wykorzystując poniższy opis źródłowy, stwórz 2-3 zdania barwnej, inspirującej narracji.",
+            "W narracji przywołaj co najmniej dwa konkrety z danych (nazwa, lokalizacja, ciekawostka historyczna).",
+            "Parafrazuj treści, zachowaj pozytywny ton i zakończ zaproszeniem, by podejść bliżej. Nie dodawaj żadnych nagłówków – zwróć samą historię.",
+            "",
+            "DANE:",
+            ...contextLines,
+            "",
+            "Narracja:",
+          ].join("\n");
+        }
+
+        buildContextLines(place, context, defaultDescription) {
+          const lines = [];
+          lines.push(`Nazwa: ${place.name ?? "Nieznane miejsce"}`);
+          const location =
+            place.raw?.Localization ||
+            place.raw?.Localisation ||
+            place.raw?.Address ||
+            place.raw?.Location ||
+            "";
+          if (location) {
+            lines.push(`Lokalizacja: ${location}`);
+          }
+          if (place.coordinates?.length === 2) {
+            lines.push(`Koordynaty: ${place.coordinates[1].toFixed(6)}, ${place.coordinates[0].toFixed(6)}`);
+          }
+          const dbDescription =
+            place.raw?.Description?.trim() ||
+            place.raw?.Opis?.trim() ||
+            place.description?.trim() ||
+            "";
+          lines.push(`Opis źródłowy: ${dbDescription || defaultDescription}`);
+          if (place.raw?.Connected_Buildings) {
+            lines.push(`Powiązane obiekty: ${place.raw.Connected_Buildings}`);
+          }
+          if (context.source === "pose_tracking") {
+            if (typeof context.distance === "number") {
+              lines.push(`Użytkownik stoi około ${context.distance.toFixed(0)} m od obiektu.`);
+            }
+            if (typeof context.bearing === "number") {
+              lines.push(`Kierunek obiektu względem użytkownika: ${context.bearing.toFixed(0)}°.`);
+            }
+          }
+          if (context.source === "map_click") {
+            lines.push("Użytkownik wybrał to miejsce ręcznie na mapie.");
+          }
+          return lines;
+        }
+
+        extractGeneratedText(fullText, prompt) {
+          if (!fullText) return "";
+          if (prompt && fullText.startsWith(prompt)) {
+            return fullText.slice(prompt.length);
+          }
+          return fullText;
+        }
+
+        async generateForPlace(task) {
+          const { place, context } = task;
+          this.isGenerating = true;
+          currentPlaceEl.textContent = `Opisuję: ${place.name ?? "wybrane miejsce"}`;
+          outputEl.textContent = "";
+          statusEl.textContent = "Generuję opis…";
+          const prompt = this.buildPrompt(place, context);
+          if (!this.wllama) {
+            statusEl.textContent = "Model nie jest gotowy – spróbuj ponownie.";
+            return;
+          }
+
+          try {
+            await this.wllama.createCompletion(prompt, {
+              nPredict: 160,
+              sampling: { temp: 0.6, top_k: 30, top_p: 0.8 },
+              onNewToken: (_token, _piece, text) => {
+                const generated = this.extractGeneratedText(text, prompt);
+                const cleaned = this.formatNarrativeOutput(generated);
+                outputEl.textContent = cleaned;
+              },
+            });
+            statusEl.textContent = "Gotowe – kliknij inne miejsce, aby wygenerować nową podpowiedź.";
+          } catch (error) {
+            console.error("Błąd podczas generowania narracji:", error);
+            statusEl.textContent = "Nie udało się wygenerować odpowiedzi. Spróbuj ponownie.";
+            outputEl.textContent = "Ups, model napotkał problem.";
+          } finally {
+            this.isGenerating = false;
+          }
+        }
+
+        formatNarrativeOutput(text) {
+          if (!text) return "";
+          const trimmed = text.trimStart();
+          const withoutLabel = trimmed.replace(/^(Narrative|Narracja|Historia)\s*:?\s*/i, "");
+          return withoutLabel.trimStart();
+        }
+      }
+
+      window.llmGuide = new BrowserGuideLLM();
+    </script>
     <script>
       const MAPTILER_KEY = "get_your_own_OpIi9ZULNHzrESv6T2vL"; // podmień na własny
       const currentOrigin = window.location.origin;
@@ -140,10 +474,21 @@
       const USER_PLACE_ID = "__user-location";
       const initialCenter = [21.0122, 52.2297]; // Warszawa
       const statusEl = document.getElementById("status");
+      const poseToggleBtn = document.getElementById("pose-toggle");
+      const poseFeedbackEl = document.getElementById("pose-feedback");
+      const telemetryElems = {
+        yaw: document.getElementById("pose-yaw"),
+        pitch: document.getElementById("pose-pitch"),
+        roll: document.getElementById("pose-roll"),
+        heading: document.getElementById("pose-heading"),
+        lat: document.getElementById("pose-lat"),
+        lon: document.getElementById("pose-lon"),
+      };
       const hasValidMaptilerKey =
         typeof MAPTILER_KEY === "string" &&
         MAPTILER_KEY.trim() !== "" &&
         !/get_your_own/i.test(MAPTILER_KEY);
+      const DATA_BASE_URL = new URL(".", window.location.href);
 
       const faraCenter = [18.00168, 53.12324];
       const map = new maplibregl.Map({
@@ -198,6 +543,13 @@
       let userLocationCoords = null;
       let poiRouteOrder = [];
       let userLocationMarker = null;
+      let poseTrackingStopper = null;
+      let poseHeadingDeg = null;
+      let poseGeoPosition = null;
+      let lastPoseNarratedId = null;
+      let mapFittedToPlaces = false;
+      const POSE_DISTANCE_THRESHOLD_METERS = 60;
+      const POSE_DIRECTION_THRESHOLD_DEG = 35;
 
       function metersToLat(meters) {
         return meters / 110540;
@@ -221,6 +573,40 @@
             [center[0] - lngOffset, center[1] - latOffset],
           ],
         ];
+      }
+
+      function degToRad(value) {
+        return (value * Math.PI) / 180;
+      }
+
+      function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
+        const R = 6371000;
+        const dLat = degToRad(lat2 - lat1);
+        const dLon = degToRad(lon2 - lon1);
+        const a =
+          Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(degToRad(lat1)) *
+            Math.cos(degToRad(lat2)) *
+            Math.sin(dLon / 2) *
+            Math.sin(dLon / 2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+      }
+
+      function bearingBetweenCoords(origin, target) {
+        const lat1 = degToRad(origin[1]);
+        const lat2 = degToRad(target[1]);
+        const deltaLon = degToRad(target[0] - origin[0]);
+        const y = Math.sin(deltaLon) * Math.cos(lat2);
+        const x =
+          Math.cos(lat1) * Math.sin(lat2) -
+          Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLon);
+        const bearing = (Math.atan2(y, x) * 180) / Math.PI;
+        return (bearing + 360) % 360;
+      }
+
+      function angularDifferenceDeg(a, b) {
+        return Math.abs((((a - b) % 360) + 540) % 360 - 180);
       }
 
       function updateStatus(message) {
@@ -272,6 +658,11 @@
         placesOfInterest.push(placeWithId);
         placeLookup.set(placeWithId.id, placeWithId);
         const markerElement = createMonumentMarkerElement(placeWithId.name);
+        markerElement.addEventListener("click", () => {
+          if (window.llmGuide) {
+            window.llmGuide.describePlace(placeWithId, { source: "map_click" });
+          }
+        });
 
         new maplibregl.Marker({ element: markerElement, anchor: "bottom" })
           .setLngLat(coordinates)
@@ -307,6 +698,180 @@
         }
         userLocationMarker.setLngLat(coords).addTo(map);
       }
+
+      function findPoseCandidate(position, headingDeg) {
+        if (!position || headingDeg == null || !placesOfInterest.length) {
+          return null;
+        }
+        let best = null;
+        placesOfInterest.forEach((place) => {
+          if (!place.coordinates) return;
+          const dist = haversineDistanceMeters(
+            position.lat,
+            position.lon,
+            place.coordinates[1],
+            place.coordinates[0]
+          );
+          if (dist > POSE_DISTANCE_THRESHOLD_METERS) return;
+          const bearing = bearingBetweenCoords(
+            [position.lon, position.lat],
+            place.coordinates
+          );
+          const diff = angularDifferenceDeg(headingDeg, bearing);
+          if (diff > POSE_DIRECTION_THRESHOLD_DEG) return;
+          if (!best || dist < best.distance) {
+            best = { place, distance: dist, bearing, diff };
+          }
+        });
+        return best;
+      }
+
+      function updatePoseMatch() {
+        if (!poseFeedbackEl) return;
+        if (!poseTrackingStopper) {
+          poseFeedbackEl.textContent = "Tryb mobilny nieaktywny.";
+          return;
+        }
+        if (poseHeadingDeg == null || !poseGeoPosition) {
+          poseFeedbackEl.textContent =
+            "Czekam na dane z czujników – pozwól na dostęp do orientacji i lokalizacji.";
+          return;
+        }
+        const candidate = findPoseCandidate(poseGeoPosition, poseHeadingDeg);
+        if (!candidate) {
+          poseFeedbackEl.textContent =
+            "W tym kierunku brak obiektu w zasięgu ok. 60 m – spróbuj podejść bliżej lub obróć telefon.";
+          return;
+        }
+        poseFeedbackEl.textContent = `Celujesz w ${candidate.place.name} (~${candidate.distance.toFixed(
+          0
+        )} m).`;
+        if (
+          candidate.place.id &&
+          candidate.place.id !== lastPoseNarratedId &&
+          window.llmGuide
+        ) {
+          lastPoseNarratedId = candidate.place.id;
+          window.llmGuide.describePlace(candidate.place, {
+            source: "pose_tracking",
+            distance: candidate.distance,
+            bearing: candidate.bearing,
+          });
+        }
+      }
+
+      async function enablePoseTracking() {
+        if (typeof DeviceOrientationEvent?.requestPermission === "function") {
+          const granted = await DeviceOrientationEvent.requestPermission();
+          if (granted !== "granted") {
+            throw new Error("Brak zgody na orientację urządzenia.");
+          }
+        }
+        if (typeof DeviceMotionEvent?.requestPermission === "function") {
+          try {
+            await DeviceMotionEvent.requestPermission();
+          } catch (error) {
+            console.warn("Nie udało się uzyskać zgody DeviceMotion:", error);
+          }
+        }
+        if (!navigator.geolocation) {
+          throw new Error("Geolokacja niedostępna w tej przeglądarce.");
+        }
+        const orientationHandler = (event) => {
+          const heading =
+            typeof event.webkitCompassHeading === "number"
+              ? event.webkitCompassHeading
+              : event.alpha == null
+              ? null
+              : (360 - event.alpha + 360) % 360;
+          if (heading == null) {
+            return;
+          }
+          poseHeadingDeg = heading;
+          telemetryElems.heading && (telemetryElems.heading.textContent = `${heading.toFixed(0)}°`);
+          if (telemetryElems.yaw && typeof event.alpha === "number") {
+            telemetryElems.yaw.textContent = `${event.alpha.toFixed(1)}°`;
+          }
+          if (telemetryElems.pitch && typeof event.beta === "number") {
+            telemetryElems.pitch.textContent = `${event.beta.toFixed(1)}°`;
+          }
+          if (telemetryElems.roll && typeof event.gamma === "number") {
+            telemetryElems.roll.textContent = `${event.gamma.toFixed(1)}°`;
+          }
+          updatePoseMatch();
+        };
+        window.addEventListener("deviceorientation", orientationHandler, true);
+        const geoWatchId = navigator.geolocation.watchPosition(
+          (pos) => {
+            poseGeoPosition = {
+              lat: pos.coords.latitude,
+              lon: pos.coords.longitude,
+            };
+            if (telemetryElems.lat) {
+              telemetryElems.lat.textContent = pos.coords.latitude.toFixed(6);
+            }
+            if (telemetryElems.lon) {
+              telemetryElems.lon.textContent = pos.coords.longitude.toFixed(6);
+            }
+            updatePoseMatch();
+          },
+          (error) => {
+            console.warn("Geolocation error:", error);
+          },
+          { enableHighAccuracy: true }
+        );
+        return () => {
+          window.removeEventListener(
+            "deviceorientation",
+            orientationHandler,
+            true
+          );
+          navigator.geolocation.clearWatch(geoWatchId);
+        };
+      }
+
+      async function startPoseTracking() {
+        if (!poseToggleBtn) return;
+        poseToggleBtn.disabled = true;
+        poseFeedbackEl.textContent = "Proszę o pozwolenia na czujniki…";
+        try {
+          poseTrackingStopper = await enablePoseTracking();
+          poseToggleBtn.textContent = "Wyłącz tryb mobilny";
+          poseFeedbackEl.textContent =
+            "Śledzę orientację – skieruj telefon w stronę obiektu, aby usłyszeć historię.";
+        } catch (error) {
+          console.error("Błąd podczas uruchamiania trybu mobilnego:", error);
+          poseFeedbackEl.textContent = `Nie udało się uruchomić trybu mobilnego: ${
+            error?.message || error
+          }`;
+          poseTrackingStopper = null;
+        } finally {
+          poseToggleBtn.disabled = false;
+        }
+      }
+
+      function stopPoseTracking() {
+        if (!poseTrackingStopper || !poseToggleBtn) return;
+        try {
+          poseTrackingStopper();
+        } catch (error) {
+          console.warn("Nie udało się zatrzymać śledzenia orientacji:", error);
+        }
+        poseTrackingStopper = null;
+        poseHeadingDeg = null;
+        poseGeoPosition = null;
+        lastPoseNarratedId = null;
+        poseToggleBtn.textContent = "Aktywuj tryb mobilny";
+        poseFeedbackEl.textContent = "Tryb mobilny nieaktywny.";
+      }
+
+      poseToggleBtn?.addEventListener("click", () => {
+        if (poseTrackingStopper) {
+          stopPoseTracking();
+        } else {
+          void startPoseTracking();
+        }
+      });
 
 
       async function loadPointsFromBackend() {
@@ -424,10 +989,10 @@
 
       async function loadPointsFromCsvFallback() {
         try {
-          updateStatus("Backend niedostępny – wczytuję punkty bezpośrednio z CSV…");
+          updateStatus("Wczytuję punkty z lokalnej bazy CSV…");
           const [lokResponse, dbResponse] = await Promise.all([
-            fetch("lokalzacja.csv", { cache: "no-store" }),
-            fetch("database.csv", { cache: "no-store" }),
+            fetch(new URL("lokalzacja.csv", DATA_BASE_URL), { cache: "no-store" }),
+            fetch(new URL("database.csv", DATA_BASE_URL), { cache: "no-store" }),
           ]);
 
           if (!lokResponse.ok) {
@@ -490,6 +1055,7 @@
           } else if (!osrmFallbackUsed) {
             updateStatus("Brak backendu – dodano tylko jeden punkt z CSV.");
           }
+          updatePoseMatch();
 
           return true;
         } catch (error) {
@@ -932,7 +1498,7 @@
           },
         });
 
-        loadPointsFromBackend();
+        loadPointsFromCsvFallback();
 
         if (typeof geolocateControl.trigger === "function") {
           geolocateControl.once("error", (error) => {
